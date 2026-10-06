@@ -46,7 +46,7 @@ strict = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["fastembed.*", "pgvector.*", "testcontainers.*"]
+module = ["asyncpg.*", "fastembed.*", "pgvector.*", "testcontainers.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -54,4 +54,3 @@ testpaths = ["tests"]
 markers = [
     "model: tests that load the real embedding model (downloads ~90 MB on first run)",
 ]
-filterwarnings = ["ignore::DeprecationWarning:testcontainers.*"]

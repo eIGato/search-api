@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     rrf_k: int = 60
     # Weight applied to similarities obtained through query expansion rather than the query itself.
     expansion_weight: float = 0.9
-    # pg_trgm word_similarity threshold for fuzzy client matches.
+    # pg_trgm strict_word_similarity threshold for fuzzy (typo-tolerant) client matches.
     client_fuzzy_threshold: float = 0.4
 
     # Optional LLM features (document summaries, LLM query expansion). Without a key the service

@@ -96,56 +96,80 @@ def _tsquery_params(query: str, expansions: Sequence[str]) -> dict[str, object]:
 
 
 def _client_sql(n_expansions: int) -> str:
+    """Best score per field (0 = no match) for the strongest `:pool` candidate clients.
+
+    Scored in SQL so that the candidate limit drops the weakest matches, not arbitrary rows:
+    "smith" must keep the client named Smith even when many "Smithson"s match too.
+    Each CASE takes the first matching tier, which is the best one because tiers are listed in
+    descending score order (fuzzy scores are at most FUZZY_MATCH_WEIGHT).
+    """
     return f"""
-        SELECT c.id,
-               lower(c.email) = :ql AS email_exact,
-               :ql IN (lower(c.first_name || ' ' || c.last_name),
-                       lower(c.last_name || ' ' || c.first_name)) AS name_exact,
-               :ql IN (lower(c.first_name), lower(c.last_name)) AS name_part_exact,
-               (:qc_ok AND split_part(c.compact_text, '|', 1) LIKE :qc_like) AS name_substring,
-               (:qc_ok AND split_part(c.compact_text, '|', 2) LIKE :qc_like) AS email_substring,
-               word_similarity(:ql, lower(c.first_name || ' ' || c.last_name)) AS name_similarity,
-               word_similarity(:ql, lower(c.email)) AS email_similarity,
-               c.description_tsv @@ websearch_to_tsquery('english', :q) AS description_match,
-               c.description_tsv @@ t.tsq AS description_related
-        FROM clients c, (SELECT {_tsquery_sql(n_expansions)} AS tsq) t
-        WHERE (:qc_ok AND c.compact_text LIKE :qc_like)
-           OR :ql <% c.name_email_text
-           OR lower(c.first_name) = :ql
-           OR lower(c.last_name) = :ql
-           OR c.description_tsv @@ t.tsq
+        WITH signals AS (
+            SELECT c.id,
+                   lower(c.email) = :ql AS email_exact,
+                   :ql IN (lower(c.first_name || ' ' || c.last_name),
+                           lower(c.last_name || ' ' || c.first_name)) AS name_exact,
+                   :ql IN (lower(c.first_name), lower(c.last_name)) AS name_part_exact,
+                   (:qc_ok AND split_part(c.compact_text, '|', 1) LIKE :qc_like)
+                       AS name_substring,
+                   (:qc_ok AND split_part(c.compact_text, '|', 2) LIKE :qc_like)
+                       AS email_substring,
+                   strict_word_similarity(:ql, lower(c.first_name || ' ' || c.last_name))
+                       AS name_similarity,
+                   strict_word_similarity(:ql, lower(c.email)) AS email_similarity,
+                   c.description_tsv @@ websearch_to_tsquery('english', :q) AS description_match,
+                   c.description_tsv @@ t.tsq AS description_related
+            FROM clients c, (SELECT {_tsquery_sql(n_expansions)} AS tsq) t
+            WHERE (:qc_ok AND c.compact_text LIKE :qc_like)
+               OR :ql <<% c.name_email_text
+               OR lower(c.first_name) = :ql
+               OR lower(c.last_name) = :ql
+               OR c.description_tsv @@ t.tsq
+        ),
+        scored AS (
+            SELECT id,
+                   CASE WHEN name_exact THEN CAST(:exact AS float8)
+                        WHEN name_part_exact THEN CAST(:name_part AS float8)
+                        WHEN name_substring THEN CAST(:substring AS float8)
+                        WHEN name_similarity >= CAST(:fuzzy_threshold AS float8)
+                            THEN CAST(:fuzzy_weight AS float8) * name_similarity
+                        ELSE 0 END AS name_score,
+                   CASE WHEN email_exact THEN CAST(:exact AS float8)
+                        WHEN email_substring THEN CAST(:substring AS float8)
+                        WHEN email_similarity >= CAST(:fuzzy_threshold AS float8)
+                            THEN CAST(:fuzzy_weight AS float8) * email_similarity
+                        ELSE 0 END AS email_score,
+                   CASE WHEN description_match THEN CAST(:description AS float8)
+                        WHEN description_related THEN CAST(:description_related AS float8)
+                        ELSE 0 END AS description_score
+            FROM signals
+        )
+        SELECT id, name_score, email_score, description_score
+        FROM scored
+        WHERE greatest(name_score, email_score, description_score) > 0
+        ORDER BY greatest(name_score, email_score, description_score) DESC, id
         LIMIT :pool
     """
 
 
-def _client_match_scores(
-    row: RowMapping, fuzzy_threshold: float
-) -> dict[schemas.ClientMatch, float]:
-    """Best score per matched field for one candidate row of _client_sql()."""
-    signals: list[tuple[bool, schemas.ClientMatch, float]] = [
-        (row["email_exact"], "email", EXACT_MATCH_SCORE),
-        (row["name_exact"], "name", EXACT_MATCH_SCORE),
-        (row["name_part_exact"], "name", NAME_PART_MATCH_SCORE),
-        (row["name_substring"], "name", SUBSTRING_MATCH_SCORE),
-        (row["email_substring"], "email", SUBSTRING_MATCH_SCORE),
-        (
-            row["name_similarity"] >= fuzzy_threshold,
-            "name",
-            FUZZY_MATCH_WEIGHT * row["name_similarity"],
-        ),
-        (
-            row["email_similarity"] >= fuzzy_threshold,
-            "email",
-            FUZZY_MATCH_WEIGHT * row["email_similarity"],
-        ),
-        (row["description_match"], "description", DESCRIPTION_MATCH_SCORE),
-        (row["description_related"], "description", DESCRIPTION_RELATED_SCORE),
-    ]
-    scores: dict[schemas.ClientMatch, float] = {}
-    for matched, field_name, score in signals:
-        if matched:
-            scores[field_name] = max(scores.get(field_name, 0.0), score)
-    return scores
+_CLIENT_SCORE_PARAMS = {
+    "exact": EXACT_MATCH_SCORE,
+    "name_part": NAME_PART_MATCH_SCORE,
+    "substring": SUBSTRING_MATCH_SCORE,
+    "fuzzy_weight": FUZZY_MATCH_WEIGHT,
+    "description": DESCRIPTION_MATCH_SCORE,
+    "description_related": DESCRIPTION_RELATED_SCORE,
+}
+
+
+def _client_match_scores(row: RowMapping) -> dict[schemas.ClientMatch, float]:
+    """Matched fields of one _client_sql() row and their scores."""
+    scores: dict[schemas.ClientMatch, float] = {
+        "name": row["name_score"],
+        "email": row["email_score"],
+        "description": row["description_score"],
+    }
+    return {field_name: score for field_name, score in scores.items() if score > 0}
 
 
 async def search_clients(
@@ -157,7 +181,7 @@ async def search_clients(
     qc_ok = len(qc) >= 3
 
     await session.execute(
-        text("SELECT set_config('pg_trgm.word_similarity_threshold', :t, true)"),
+        text("SELECT set_config('pg_trgm.strict_word_similarity_threshold', :t, true)"),
         {"t": str(settings.client_fuzzy_threshold)},
     )
     rows = (
@@ -168,6 +192,8 @@ async def search_clients(
                 "ql": ql,
                 "qc_ok": qc_ok,
                 "qc_like": f"%{_escape_like(qc)}%",
+                **_CLIENT_SCORE_PARAMS,
+                "fuzzy_threshold": settings.client_fuzzy_threshold,
                 "pool": settings.candidate_pool,
             },
         )
@@ -175,13 +201,10 @@ async def search_clients(
 
     hits: list[ClientHit] = []
     for row in rows:
-        scores = _client_match_scores(row, settings.client_fuzzy_threshold)
-        if scores:
-            matched_by = sorted(scores, key=lambda m: -scores[m])
-            hits.append(ClientHit(row["id"], round(max(scores.values()), 4), matched_by))
-
-    hits.sort(key=lambda h: -h.score)
-    return hits
+        scores = _client_match_scores(row)
+        matched_by = sorted(scores, key=lambda m: -scores[m])
+        hits.append(ClientHit(row["id"], round(max(scores.values()), 4), matched_by))
+    return hits  # already ordered by score in SQL
 
 
 # --- Documents ---------------------------------------------------------------------------------

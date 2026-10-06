@@ -45,9 +45,9 @@ def create_app(settings: Settings | None = None, embedder: Embedder | None = Non
                 f"vectors but the database stores {EMBEDDING_DIM}-d vectors; add a migration."
             )
 
-        app.state.llm = None
+        llm = None
         if settings.anthropic_api_key is not None:
-            app.state.llm = LLMClient(
+            llm = LLMClient(
                 settings.anthropic_api_key.get_secret_value(),
                 settings.llm_model,
                 settings.llm_timeout_seconds,
@@ -55,12 +55,13 @@ def create_app(settings: Settings | None = None, embedder: Embedder | None = Non
             logger.info("LLM features enabled with model %s", settings.llm_model)
         else:
             logger.info("ANTHROPIC_API_KEY not set: extractive summaries, thesaurus-only expansion")
+        app.state.llm = llm
 
         try:
             yield
         finally:
-            if app.state.llm is not None:
-                await app.state.llm.close()
+            if llm is not None:
+                await llm.close()
             await engine.dispose()
 
     app = FastAPI(

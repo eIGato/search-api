@@ -120,6 +120,22 @@ CONCEPTS: tuple[Concept, ...] = (
         evidence=("proof of identity", "proof of address", "source of wealth", "aml check"),
     ),
     Concept(
+        aliases=(
+            "sustainable investing",
+            "esg",
+            "responsible investing",
+            "impact investing",
+            "ethical investing",
+        ),
+        evidence=(
+            "esg preferences",
+            "green bonds",
+            "renewable energy",
+            "fossil fuel exclusion",
+            "climate",
+        ),
+    ),
+    Concept(
         aliases=("portfolio performance", "investment performance"),
         evidence=("quarterly report", "portfolio report", "performance report", "valuation"),
     ),
