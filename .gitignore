@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+.env
+.fastembed_cache/
+.idea/
+.vscode/
+# onnxruntime telemetry session file
+*.ses
