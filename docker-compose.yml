@@ -2,29 +2,34 @@ services:
   db:
     image: pgvector/pgvector:pg18
     environment:
-      POSTGRES_USER: search
-      POSTGRES_PASSWORD: search
-      POSTGRES_DB: search
+      POSTGRES_USER: ${POSTGRES_USER:-search}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-search}
+      POSTGRES_DB: ${POSTGRES_DB:-search}
     ports:
-      # 5433 on the host to avoid clashing with a locally running Postgres.
-      - "5433:5432"
+      # 5433 on the host by default, to avoid clashing with a locally running Postgres.
+      - "${POSTGRES_PORT:-5433}:5432"
     volumes:
       - db-data:/var/lib/postgresql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U search -d search"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-search} -d ${POSTGRES_DB:-search}"]
       interval: 2s
       timeout: 3s
       retries: 30
 
   api:
     build: .
+    # Settings and secrets (API_KEY, ANTHROPIC_API_KEY, ...): see .env.example.
+    # Optional, so that `docker compose up` works out of the box.
+    env_file:
+      - path: .env
+        required: false
     environment:
-      DATABASE_URL: postgresql+asyncpg://search:search@db:5432/search
-      # Optional, read from the shell or a .env file next to this compose file.
-      API_KEY: ${API_KEY:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Inside the compose network the database is `db`, not localhost.
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-search}:${POSTGRES_PASSWORD:-search}@db:5432/${POSTGRES_DB:-search}
+      # The image ships the embedding model here; a local path from .env must not override it.
+      EMBEDDING_CACHE_DIR: /app/models
     ports:
-      - "8000:8000"
+      - "${API_PORT:-8000}:8000"
     depends_on:
       db:
         condition: service_healthy

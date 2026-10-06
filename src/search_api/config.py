@@ -5,7 +5,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # Empty variables (e.g. `API_KEY=` from docker-compose defaults) count as unset.
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", env_ignore_empty=True)
 
     database_url: str = "postgresql+asyncpg://search:search@localhost:5433/search"
     # Per worker process. Requests hold a connection only for their short SQL phases (never
