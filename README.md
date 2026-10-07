@@ -399,7 +399,7 @@ stack needs:
 |---|---|---|
 | CPU | 2 vCPU (1 works) | Search p50 18 ms on 2 vCPU, 57 ms on 1; embedding is the only CPU-heavy work. |
 | RAM | 2 GB | API ~250 MB idle (mostly the model), Postgres 40-170 MB. Embedding a maximum-size document (500k characters) peaks at ~1.3 GB. |
-| Disk | 20 GB | Images ~1.4 GB, data tens of MB. |
+| Disk | 20 GB | Images ~1.5 GB, data tens of MB. |
 
 Build the image locally (the server then needs neither the sources nor network access to
 the model) and copy it over with the compose file:
@@ -407,7 +407,9 @@ the model) and copy it over with the compose file:
 ```bash
 docker compose build api
 docker save search-api:latest | gzip | ssh user@server 'gunzip | docker load'
-ssh user@server mkdir -p search-api && scp docker-compose.yml user@server:search-api/
+ssh user@server mkdir -p search-api/deploy
+scp docker-compose.yml compose.tls.yml user@server:search-api/
+scp deploy/Caddyfile user@server:search-api/deploy/
 ```
 
 On the server, create `.env` before the first start (Postgres takes its password only when it
@@ -420,14 +422,26 @@ docker compose up -d --no-build
 grep API_KEY .env             # the key to hand out
 ```
 
+**HTTPS**, even without a domain: [`compose.tls.yml`](compose.tls.yml) puts Caddy in front of
+the API. Caddy obtains a Let's Encrypt certificate for `PUBLIC_HOST`, which can be a domain or
+a bare IPv4 address (Let's Encrypt issues IP certificates with its 6-day `shortlived` profile;
+Caddy renews them automatically). The API is then reachable only through Caddy. Ports 80 and
+443 must be open.
+
+```bash
+printf 'PUBLIC_HOST=%s\nCOMPOSE_FILE=docker-compose.yml:compose.tls.yml\n' 203.0.113.10 >> .env
+docker compose up -d --no-build
+```
+
 Load the demo data from your machine: `python3 scripts/seed_demo.py http://<server> <API_KEY>`.
 To update, repeat the `docker save` step and run `docker compose up -d --no-build` again.
 
 * Postgres is published on `127.0.0.1` only. Docker bypasses host firewalls such as `ufw`,
   so a port published on all interfaces would be reachable from the internet.
 * Both containers restart automatically after a crash or a reboot.
-* Without a domain and TLS, the API key travels in plain text: use a dedicated key and rotate
-  it afterwards. Put a reverse proxy with TLS (e.g. Caddy) in front for anything longer-lived.
+* Without `compose.tls.yml`, the API key travels in plain text.
+* Caddy keeps certificates in a volume. Let's Encrypt issues at most 5 certificates per host per
+  week, so do not delete the volume on every redeploy.
 * `ANTHROPIC_API_KEY` is optional. If you set it on a public server, also set a spend limit
   in the Anthropic console.
 
@@ -446,6 +460,7 @@ src/search_api/
   schemas.py      request/response models
   config.py       settings (environment variables)
 migrations/       Alembic migrations
+deploy/           Caddyfile for the HTTPS proxy (compose.tls.yml)
 scripts/          demo data loader
 tests/
 ```

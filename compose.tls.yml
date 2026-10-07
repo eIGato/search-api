@@ -1,0 +1,35 @@
+# HTTPS in front of the API: Caddy with an automatic Let's Encrypt certificate, also for a bare
+# IP address. Set PUBLIC_HOST in .env, then either
+#   docker compose -f docker-compose.yml -f compose.tls.yml up -d --no-build
+# or add COMPOSE_FILE=docker-compose.yml:compose.tls.yml to .env and use plain `docker compose`.
+# Ports 80 and 443 must be reachable from the internet (80 for the ACME challenge and redirects).
+services:
+  api:
+    # Reachable only through Caddy.
+    ports: !reset []
+    environment:
+      # Trust X-Forwarded-Proto from Caddy, so that Location headers use https.
+      FORWARDED_ALLOW_IPS: "*"
+
+  caddy:
+    image: caddy:2.11
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST:?set PUBLIC_HOST (domain or IP address) in .env}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and ACME account. Keep it: Let's Encrypt allows 5 certificates per host
+      # per week, so losing it on every restart would soon lock the host out.
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  caddy-data:
+  caddy-config:
