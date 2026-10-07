@@ -390,6 +390,47 @@ uv run alembic upgrade head
 uv run search-api --reload --port 8000        # DATABASE_URL defaults to localhost:5433
 ```
 
+## Deployment (single server)
+
+The compose file runs as is on any Linux server with Docker. Measured with demo data, the
+stack needs:
+
+| Resource | Recommended | Why |
+|---|---|---|
+| CPU | 2 vCPU (1 works) | Search p50 18 ms on 2 vCPU, 57 ms on 1; embedding is the only CPU-heavy work. |
+| RAM | 2 GB | API ~250 MB idle (mostly the model), Postgres 40-170 MB. Embedding a maximum-size document (500k characters) peaks at ~1.3 GB. |
+| Disk | 20 GB | Images ~1.4 GB, data tens of MB. |
+
+Build the image locally (the server then needs neither the sources nor network access to
+the model) and copy it over with the compose file:
+
+```bash
+docker compose build api
+docker save search-api:latest | gzip | ssh user@server 'gunzip | docker load'
+ssh user@server mkdir -p search-api && scp docker-compose.yml user@server:search-api/
+```
+
+On the server, create `.env` before the first start (Postgres takes its password only when it
+initializes the volume), then start the stack from the loaded image:
+
+```bash
+cd search-api
+printf 'API_PORT=80\nAPI_KEY=%s\nPOSTGRES_PASSWORD=%s\n' "$(openssl rand -hex 24)" "$(openssl rand -hex 24)" > .env
+docker compose up -d --no-build
+grep API_KEY .env             # the key to hand out
+```
+
+Load the demo data from your machine: `python3 scripts/seed_demo.py http://<server> <API_KEY>`.
+To update, repeat the `docker save` step and run `docker compose up -d --no-build` again.
+
+* Postgres is published on `127.0.0.1` only. Docker bypasses host firewalls such as `ufw`,
+  so a port published on all interfaces would be reachable from the internet.
+* Both containers restart automatically after a crash or a reboot.
+* Without a domain and TLS, the API key travels in plain text: use a dedicated key and rotate
+  it afterwards. Put a reverse proxy with TLS (e.g. Caddy) in front for anything longer-lived.
+* `ANTHROPIC_API_KEY` is optional. If you set it on a public server, also set a spend limit
+  in the Anthropic console.
+
 ## Project layout
 
 ```

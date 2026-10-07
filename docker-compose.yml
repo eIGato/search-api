@@ -1,13 +1,15 @@
 services:
   db:
     image: pgvector/pgvector:pg18
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-search}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-search}
       POSTGRES_DB: ${POSTGRES_DB:-search}
     ports:
-      # 5433 on the host by default, to avoid clashing with a locally running Postgres.
-      - "${POSTGRES_PORT:-5433}:5432"
+      # Loopback only: Docker bypasses host firewalls such as ufw, so a plain "5433:5432" would
+      # expose the database to the internet on a server. 5433 avoids clashing with a local Postgres.
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
     volumes:
       - db-data:/var/lib/postgresql
     healthcheck:
@@ -18,6 +20,9 @@ services:
 
   api:
     build: .
+    # A fixed name, so that an image built elsewhere and loaded on a server is used as is.
+    image: search-api:latest
+    restart: unless-stopped
     # Settings and secrets (API_KEY, ANTHROPIC_API_KEY, ...): see .env.example.
     # Optional, so that `docker compose up` works out of the box.
     env_file:
