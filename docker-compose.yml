@@ -1,0 +1,43 @@
+services:
+  db:
+    image: pgvector/pgvector:pg18
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-search}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-search}
+      POSTGRES_DB: ${POSTGRES_DB:-search}
+    ports:
+      # Loopback only: Docker bypasses host firewalls such as ufw, so a plain "5433:5432" would
+      # expose the database to the internet on a server. 5433 avoids clashing with a local Postgres.
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - db-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-search} -d ${POSTGRES_DB:-search}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  api:
+    build: .
+    # A fixed name, so that an image built elsewhere and loaded on a server is used as is.
+    image: search-api:latest
+    restart: unless-stopped
+    # Settings and secrets (API_KEY, ANTHROPIC_API_KEY, ...): see .env.example.
+    # Optional, so that `docker compose up` works out of the box.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Inside the compose network the database is `db`, not localhost.
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-search}:${POSTGRES_PASSWORD:-search}@db:5432/${POSTGRES_DB:-search}
+      # The image ships the embedding model here; a local path from .env must not override it.
+      EMBEDDING_CACHE_DIR: /app/models
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  db-data:

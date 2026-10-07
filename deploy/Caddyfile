@@ -1,0 +1,14 @@
+# HTTPS reverse proxy for the API; see compose.tls.yml. PUBLIC_HOST is a domain or a bare IP.
+{
+	# Clients connecting to a bare IP send no SNI: serve them the PUBLIC_HOST certificate.
+	default_sni {$PUBLIC_HOST}
+	cert_issuer acme {
+		# Let's Encrypt issues IP address certificates only with this 6-day profile; Caddy
+		# renews them automatically. It works for domains too.
+		profile shortlived
+	}
+}
+
+{$PUBLIC_HOST} {
+	reverse_proxy api:8000
+}

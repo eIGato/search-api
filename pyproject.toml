@@ -1,0 +1,56 @@
+[project]
+name = "search-api"
+version = "0.1.0"
+description = "Search API across advisor clients and their documents (lexical + semantic hybrid search)"
+requires-python = ">=3.13"
+dependencies = [
+    "alembic>=1.20.0",
+    "anthropic>=1.11.0",
+    "asyncpg>=0.31.0",
+    "fastapi>=0.142.2",
+    "fastembed>=0.8.1",
+    "pgvector>=0.5.0",
+    "pydantic-settings>=2.15.0",
+    "pydantic[email]>=2.13.5",
+    "sqlalchemy[asyncio]>=2.1.3",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[project.scripts]
+search-api = "search_api.__main__:main"
+
+[build-system]
+requires = ["uv_build>=0.11.7,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "mypy>=2.4.0",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.16.10",
+    "testcontainers[postgres]>=4.15.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "ASYNC", "RUF"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["asyncpg.*", "fastembed.*", "pgvector.*", "testcontainers.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "model: tests that load the real embedding model (downloads ~90 MB on first run)",
+]
