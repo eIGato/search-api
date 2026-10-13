@@ -8,6 +8,7 @@ unavailable.
 import asyncio
 import logging
 import time
+from typing import Protocol
 
 import anthropic
 from pydantic import BaseModel
@@ -31,11 +32,29 @@ EXPANSION_SYSTEM = (
 )
 
 
+class LanguageModel(Protocol):
+    """What the services need from an LLM. Methods return None when the call failed."""
+
+    @property
+    def model(self) -> str: ...
+
+    @property
+    def max_call_seconds(self) -> float:
+        """Upper bound for one method call, including retries."""
+        ...
+
+    async def summarize(self, title: str, content: str) -> str | None: ...
+
+    async def expand_query(self, query: str) -> list[str] | None: ...
+
+
 class _Expansions(BaseModel):
     phrases: list[str]
 
 
 class LLMClient:
+    """LanguageModel backed by the Claude API. Owns an HTTP client: call close() when done."""
+
     MAX_RETRIES = 1
 
     def __init__(self, api_key: str, model: str, timeout_seconds: float) -> None:

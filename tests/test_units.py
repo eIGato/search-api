@@ -11,8 +11,8 @@ import pytest
 
 from search_api.chunking import chunk_text, split_sentences
 from search_api.llm import LLMClient
-from search_api.search import compact, fuse
-from search_api.summary import extractive_summary
+from search_api.ranking import KeywordCandidate, SemanticCandidate, compact, fuse
+from search_api.services.summaries import extractive_summary
 from search_api.thesaurus import expand_query
 from tests.conftest import HashingEmbedder
 
@@ -115,8 +115,8 @@ def test_compact(raw: str, expected: str) -> None:
 
 def test_fuse_rewards_agreement_between_retrievers() -> None:
     a, b, c = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-    keyword = [(a, "**a** headline"), (b, "b headline")]
-    semantic = [(a, 0.8, "a chunk"), (c, 0.7, "c chunk")]
+    keyword = [KeywordCandidate(a, "**a** headline"), KeywordCandidate(b, "b headline")]
+    semantic = [SemanticCandidate(a, 0.8, "a chunk"), SemanticCandidate(c, 0.7, "c chunk")]
 
     hits = fuse(keyword, semantic, rrf_k=60)
 
@@ -135,7 +135,7 @@ def test_fuse_rewards_agreement_between_retrievers() -> None:
 def test_fuse_truncates_long_chunk_snippets_on_word_boundary() -> None:
     doc = uuid.uuid4()
     long_chunk = "word " * 200
-    [hit] = fuse([], [(doc, 0.5, long_chunk)], rrf_k=60)
+    [hit] = fuse([], [SemanticCandidate(doc, 0.5, long_chunk)], rrf_k=60)
     assert len(hit.snippet) <= 301
     assert hit.snippet.endswith("word…")
 

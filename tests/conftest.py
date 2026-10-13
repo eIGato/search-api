@@ -2,7 +2,8 @@ import asyncio
 import hashlib
 import os
 import re
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from search_api.config import Settings
 from search_api.embeddings import Embedder
+from search_api.llm import LanguageModel
 from search_api.main import create_app
 from search_api.models import EMBEDDING_DIM
 
@@ -105,8 +107,27 @@ def embedder() -> Embedder:
 @pytest.fixture
 def client(settings: Settings, embedder: Embedder, database_url: str) -> Iterator[TestClient]:
     _truncate(database_url)
-    with TestClient(create_app(settings, embedder)) as test_client:
+    with TestClient(create_app(settings, embedder=embedder)) as test_client:
         yield test_client
+
+
+MakeApi = Callable[..., AbstractContextManager[TestClient]]
+
+
+@pytest.fixture
+def make_api(settings: Settings, embedder: Embedder) -> MakeApi:
+    """Another app instance on the same database, e.g. with an LLM or different settings.
+
+    Each instance is like a separate worker process: it shares only the database.
+    """
+
+    @contextmanager
+    def make(*, llm: LanguageModel | None = None, **overrides: object) -> Iterator[TestClient]:
+        app_settings = settings.model_copy(update=overrides)
+        with TestClient(create_app(app_settings, embedder=embedder, llm=llm)) as api:
+            yield api
+
+    return make
 
 
 def create_client(api: TestClient, **overrides: object) -> Json:

@@ -14,9 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from search_api.config import Settings
 from search_api.embeddings import Embedder
-from search_api.main import create_app
-from search_api.search import _semantic_candidates
-from tests.conftest import Json, create_client, create_document
+from search_api.ranking import SemanticCandidate
+from search_api.repositories import SearchRepository
+from tests.conftest import Json, MakeApi, create_client, create_document
 
 # Fixtures: test data by short name.
 People = dict[str, Json]
@@ -195,37 +195,40 @@ def test_extractive_summary_without_llm(client: TestClient) -> None:
     assert client.get(url).json() == body  # cached
 
 
-def test_llm_summary_is_used_and_cached(client: TestClient) -> None:
+def test_llm_summary_is_used_and_cached(client: TestClient, make_api: MakeApi) -> None:
     url = _summary_url(client)
     llm = FakeLLM("A Q3 portfolio review.")
-    client.app.state.llm = llm  # type: ignore[attr-defined]
 
-    assert client.get(url).json()["summary"] == "A Q3 portfolio review."
-    assert client.get(url).json()["method"] == "llm"
+    with make_api(llm=llm) as api:
+        assert api.get(url).json()["summary"] == "A Q3 portfolio review."
+        assert api.get(url).json()["method"] == "llm"
     assert llm.calls == 1
 
 
-def test_llm_failure_falls_back_to_extractive_and_retries_later(client: TestClient) -> None:
+def test_llm_failure_falls_back_to_extractive_and_retries_later(
+    client: TestClient, make_api: MakeApi
+) -> None:
     url = _summary_url(client)
     llm = FakeLLM(None)
-    client.app.state.llm = llm  # type: ignore[attr-defined]
 
-    assert client.get(url).json()["method"] == "extractive"
-    llm.summary = "Recovered."
-    assert client.get(url).json() == {
-        "document_id": url.split("/")[-2],
-        "summary": "Recovered.",
-        "method": "llm",
-    }
+    with make_api(llm=llm) as api:
+        assert api.get(url).json()["method"] == "extractive"
+        llm.summary = "Recovered."
+        assert api.get(url).json() == {
+            "document_id": url.split("/")[-2],
+            "summary": "Recovered.",
+            "method": "llm",
+        }
 
 
-def test_concurrent_summary_requests_call_the_llm_once(client: TestClient) -> None:
+def test_concurrent_summary_requests_call_the_llm_once(
+    client: TestClient, make_api: MakeApi
+) -> None:
     url = _summary_url(client)
     llm = FakeLLM("One summary.", delay=0.5)
-    client.app.state.llm = llm  # type: ignore[attr-defined]
 
-    with ThreadPoolExecutor(max_workers=5) as pool:
-        responses = list(pool.map(lambda _: client.get(url), range(5)))
+    with make_api(llm=llm) as api, ThreadPoolExecutor(max_workers=5) as pool:
+        responses = list(pool.map(lambda _: api.get(url), range(5)))
 
     assert [r.status_code for r in responses] == [200] * 5
     assert {r.json()["summary"] for r in responses} == {"One summary."}
@@ -326,7 +329,7 @@ def test_search_short_query_does_not_match_everyone(client: TestClient, people: 
 
 
 def test_candidate_pool_keeps_the_strongest_client_matches(
-    client: TestClient, settings: Settings, embedder: Embedder
+    client: TestClient, make_api: MakeApi
 ) -> None:
     # Created first, so that an unordered scan would meet the weaker matches first.
     for i in range(5):
@@ -335,8 +338,7 @@ def test_candidate_pool_keeps_the_strongest_client_matches(
         )
     create_client(client, first_name="Tom", last_name="Smith", email="tom@example.org")
 
-    small_pool = settings.model_copy(update={"candidate_pool": 3})
-    with TestClient(create_app(small_pool, embedder)) as api:
+    with make_api(candidate_pool=3) as api:
         results = search(api, "smith", type="client")
 
     assert len(results) == 3
@@ -414,22 +416,22 @@ def test_semantic_search_within_one_client_is_exhaustive(
         create_document(client, others["id"], "Investigation", f"Investigation {i}.")
     memo = create_document(client, target["id"], "Memo", "Investment notes.")
 
-    async def run() -> list[tuple[uuid.UUID, float, str]]:
+    async def run() -> list[SemanticCandidate]:
         engine = create_async_engine(database_url, poolclass=NullPool)
         try:
-            async with AsyncSession(engine) as session:
+            async with AsyncSession(engine) as session, session.begin():
                 await session.execute(text("SET LOCAL enable_sort = off"))
-                return await _semantic_candidates(
-                    session,
+                return await SearchRepository(session).semantic_candidates(
                     embedder.embed_queries(["investigation"]),
                     [1.0],
                     uuid.UUID(target["id"]),
-                    settings.model_copy(update={"candidate_pool": 10}),
+                    pool=10,
+                    min_similarity=settings.min_semantic_similarity,
                 )
         finally:
             await engine.dispose()
 
-    assert [str(doc_id) for doc_id, _, _ in asyncio.run(run())] == [memo["id"]]
+    assert [str(c.document_id) for c in asyncio.run(run())] == [memo["id"]]
 
 
 def test_client_named_in_query_ranks_above_documents_mentioning_them(
@@ -446,11 +448,13 @@ def test_search_limit(client: TestClient, people: People) -> None:
     assert len(search(client, "bank statement", limit=3)) == 3
 
 
-def test_llm_expansions_are_used_when_configured(client: TestClient, people: People) -> None:
+def test_llm_expansions_are_used_when_configured(
+    client: TestClient, make_api: MakeApi, people: People
+) -> None:
     create_document(client, people["john"]["id"], "Memo", "An llm suggested phrase appears here.")
-    client.app.state.llm = FakeLLM(None)  # type: ignore[attr-defined]
 
-    response = client.get("/search", params={"q": "special", "type": "document"})
+    with make_api(llm=FakeLLM(None)) as api:
+        response = api.get("/search", params={"q": "special", "type": "document"})
     assert titles(response.json()) == ["Memo"]
     assert json.loads(response.headers["X-Search-Expansions"]) == ["llm suggested phrase"]
 
@@ -466,50 +470,44 @@ def test_llm_expansions_are_used_when_configured(client: TestClient, people: Peo
     ],
 )
 def test_llm_is_not_asked_when_it_cannot_help(
-    client: TestClient, people: People, query: str, params: dict[str, str]
+    make_api: MakeApi, people: People, query: str, params: dict[str, str]
 ) -> None:
     llm = FakeLLM(None)
-    client.app.state.llm = llm  # type: ignore[attr-defined]
-    assert client.get("/search", params={"q": query, **params}).status_code == 200
+    with make_api(llm=llm) as api:
+        assert api.get("/search", params={"q": query, **params}).status_code == 200
     assert llm.expansion_calls == []
 
 
-def test_llm_expansions_are_cached_in_the_database(
-    client: TestClient, settings: Settings, embedder: Embedder, people: People
-) -> None:
+def test_llm_expansions_are_cached_in_the_database(make_api: MakeApi, people: People) -> None:
     llm = FakeLLM(None, expansions={"special": ["llm suggested phrase"], "flaky": None})
-    client.app.state.llm = llm  # type: ignore[attr-defined]
 
-    search(client, "special")
-    search(client, "Special ")  # same cache key
+    with make_api(llm=llm) as api:
+        search(api, "special")
+        search(api, "Special ")  # same cache key
     # A restarted (or another) worker shares the cache.
-    with TestClient(create_app(settings, embedder)) as other_worker:
-        other_worker.app.state.llm = llm  # type: ignore[attr-defined]
+    with make_api(llm=llm) as other_worker:
         response = other_worker.get("/search", params={"q": "special"})
         assert json.loads(response.headers["X-Search-Expansions"]) == ["llm suggested phrase"]
-    assert llm.expansion_calls == ["special"]
+        assert llm.expansion_calls == ["special"]
 
-    # Failures are not cached.
-    search(client, "flaky")
-    search(client, "flaky")
+        # Failures are not cached.
+        search(other_worker, "flaky")
+        search(other_worker, "flaky")
     assert llm.expansion_calls == ["special", "flaky", "flaky"]
 
 
 def test_no_connection_is_held_during_slow_work(
-    settings: Settings, embedder: Embedder, client: TestClient, people: People
+    client: TestClient, make_api: MakeApi, people: People
 ) -> None:
     """With a single pooled connection, requests that each wait on a slow LLM still all succeed:
     if the connection were held during the LLM call they would queue behind each other and run
     into the pool timeout."""
-    one_connection = settings.model_copy(
-        update={"db_pool_size": 1, "db_max_overflow": 0, "db_pool_timeout_seconds": 1.0}
-    )
     document = create_document(client, people["john"]["id"], "Memo", "Quarterly review notes.")
     summary_url = f"/clients/{people['john']['id']}/documents/{document['id']}/summary"
     llm = FakeLLM("Summary.", delay=0.6)
 
-    with TestClient(create_app(one_connection, embedder)) as api:
-        api.app.state.llm = llm  # type: ignore[attr-defined]
+    one_connection = {"db_pool_size": 1, "db_max_overflow": 0, "db_pool_timeout_seconds": 1.0}
+    with make_api(llm=llm, **one_connection) as api:
         requests = [("/search", {"q": f"uncovered query {i}"}) for i in range(4)]
         requests.append((summary_url, {}))
         with ThreadPoolExecutor(max_workers=len(requests)) as pool:
@@ -544,11 +542,8 @@ def test_search_with_no_data(client: TestClient) -> None:
 # --- auth & health -----------------------------------------------------------------------------
 
 
-def test_api_key_is_enforced_when_configured(
-    settings: Settings, embedder: Embedder, client: TestClient
-) -> None:
-    secured = settings.model_copy(update={"api_key": SecretStr("s3cret")})
-    with TestClient(create_app(secured, embedder)) as api:
+def test_api_key_is_enforced_when_configured(client: TestClient, make_api: MakeApi) -> None:
+    with make_api(api_key=SecretStr("s3cret")) as api:
         assert api.get("/search", params={"q": "x"}).status_code == 401
         assert (
             api.get("/search", params={"q": "x"}, headers={"X-API-Key": "wrong"}).status_code == 401

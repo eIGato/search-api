@@ -1,9 +1,9 @@
 import secrets
 
-from fastapi import HTTPException, Request, Security, status
+from fastapi import HTTPException, Security, status
 from fastapi.security import APIKeyHeader
 
-from search_api.config import Settings
+from search_api.api.dependencies import AppContainer
 
 api_key_header = APIKeyHeader(
     name="X-API-Key",
@@ -12,11 +12,13 @@ api_key_header = APIKeyHeader(
 )
 
 
-async def require_api_key(request: Request, api_key: str | None = Security(api_key_header)) -> None:
-    settings: Settings = request.app.state.settings
-    if settings.api_key is None:
+async def require_api_key(
+    container: AppContainer, api_key: str | None = Security(api_key_header)
+) -> None:
+    configured = container.settings.api_key
+    if configured is None:
         return
-    expected = settings.api_key.get_secret_value().encode()
+    expected = configured.get_secret_value().encode()
     if api_key is None or not secrets.compare_digest(api_key.encode(), expected):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
