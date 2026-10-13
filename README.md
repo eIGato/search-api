@@ -320,18 +320,67 @@ keeps the client named Smith even among many Smithsons.
 * **Emails are unique (case-insensitive).** Duplicate clients would make search results
   ambiguous for advisors, so a duplicate returns `409`.
 
+## Architecture
+
+Three layers, each depending only on the ones below it:
+
+```
+api/           HTTP: parse and validate requests, map domain objects to response schemas and
+               domain errors to status codes. One service call per endpoint, no business logic.
+services/      Business logic and transaction boundaries. Decide what runs inside a transaction
+               and what runs between transactions (embedding, LLM calls).
+repositories/  SQL. Run inside the transaction they are given, never commit, return domain
+               objects (not ORM rows that would outlive their session).
+```
+
+`domain.py` holds the immutable objects passed between the layers, `errors.py` the domain errors
+(`NotFoundError`, `ConflictError`, `InvalidRequestError`). `ranking.py` is the search ranking
+logic without I/O: client score tiers, rank fusion, merging clients and documents.
+
+**Transactions.** All database access goes through `Database.transaction()`, which commits when
+its block exits normally and rolls back when it raises. A `UnitOfWork` gives the repositories of
+that one transaction. Rules:
+
+* Slow work that does not need the database (embedding, LLM calls) runs between transactions,
+  never inside one, so a request does not hold a connection while it waits.
+* Read-only transactions run at `REPEATABLE READ, READ ONLY`: all their statements see one
+  snapshot. A search ranks and loads its results in one such transaction, so a result that was
+  ranked is always found when it is loaded.
+* When a write depends on something read before slow work, the write transaction checks it
+  again and locks it:
+  * `POST /clients/{id}/documents` checks the client (to fail fast, before embedding), embeds,
+    then inserts the document and its chunks in one transaction that locks the client row
+    (`FOR KEY SHARE`), so the client cannot be deleted before the insert commits.
+  * A summary lease is identified by a token. Only its holder can store the LLM result and
+    release the lease, even if the lease expired and another request took it over meanwhile.
+  * An extractive summary is stored only if no summary was stored meanwhile (it may be a
+    better LLM one).
+  * The LLM expansion cache is written after the LLM call in its own transaction. It is a cache
+    entry independent of other data, and concurrent writers keep the first one
+    (`ON CONFLICT DO NOTHING`).
+
+**Dependencies and state.** `container.py` is the composition root: at startup it builds the
+database pool, the embedding model, the optional LLM client and the services, and it closes
+what it created at shutdown. Tests pass their own embedder and LLM to `create_app()`; resources
+passed in stay owned by the caller. The container reaches requests through the FastAPI lifespan
+state, and routes depend on typed services (`api/dependencies.py`); nothing is stored on, or
+changed through, the app object. Services receive what they use in their constructors
+(`Database`, `Embedder`, `LanguageModel`, settings).
+
 ## Concurrency and performance
 
 * **The service is async end to end.** CPU-bound embedding runs in a thread pool; ONNX Runtime
   releases the GIL and uses all cores.
-* **No request holds a database connection during slow work.** Each request runs short SQL
-  phases and returns its connection to the pool before embedding or calling the LLM. A small
+* **No request holds a database connection during slow work.** Each request runs short
+  transactions and returns its connection to the pool before embedding or calling the LLM (see
+  "Architecture"). A small
   pool therefore serves many concurrent requests, and overload shows up as latency instead of
   pool timeouts. A test with a single-connection pool and a slow LLM checks this.
 * **Races.**
   * Duplicate emails: a unique index, so concurrent identical `POST /clients` give exactly one
     `201` and the rest `409`.
-  * Summaries: a lease (see above).
+  * Summaries: a lease with an owner token (see above).
+  * Documents of a client deleted while they are being embedded: `404`, nothing stored.
   * Expansion cache inserts: `ON CONFLICT DO NOTHING`.
 * **Throughput is bound by CPU.** Measured on an 8-thread laptop with demo data:
 
@@ -375,6 +424,10 @@ calls.
   * the LLM paths, using a fake LLM: fallbacks, when the LLM is (not) asked, the expansion
     cache across app instances, one LLM call for concurrent summary requests;
   * no connection held during slow work (single-connection pool, slow LLM).
+* `tests/test_transactions.py`: transaction boundaries. Read-only transactions see one snapshot
+  and reject writes, failed blocks roll back, a client deleted during embedding gives a `404`
+  without orphaned rows, an expired summary lease cannot release its successor's, and an
+  extractive summary does not overwrite a stored one.
 * `tests/test_semantic.py` (marker `model`): golden queries on a realistic corpus with the real
   model.
   * Recall: the right documents rank first, including the assignment's examples.
@@ -449,13 +502,20 @@ To update, repeat the `docker save` step and run `docker compose up -d --no-buil
 
 ```
 src/search_api/
-  api.py          HTTP endpoints
-  search.py       client matching, document retrievers, rank fusion, merging
+  api/            HTTP layer: routes, dependencies, auth, error mapping
+  services/       business logic and transaction boundaries (clients, documents, search,
+                  summaries with a generation lease)
+  repositories/   SQL: clients, documents, search retrievers, expansion cache; UnitOfWork
+  domain.py       immutable domain objects passed between the layers
+  errors.py       domain errors
+  ranking.py      client score tiers, rank fusion, merging (pure)
   thesaurus.py    domain concepts for query expansion
-  embeddings.py   embedder interface + fastembed implementation
   chunking.py     sentence-aware overlapping chunks
-  llm.py          Claude summaries and query expansion, with graceful fallbacks
-  summary.py      summaries: extractive, and LLM with a generation lease
+  embeddings.py   embedder interface + fastembed implementation
+  llm.py          LLM interface + Claude client with graceful fallbacks
+  db.py           connection pool and transactions
+  container.py    composition root: builds and closes resources and services
+  main.py         FastAPI app and lifespan
   models.py       SQLAlchemy models (generated search columns, vector chunks)
   schemas.py      request/response models
   config.py       settings (environment variables)

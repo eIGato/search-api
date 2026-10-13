@@ -87,6 +87,8 @@ class Document(Base):
     # Lease taken by the request generating the LLM summary, so that concurrent requests (in any
     # worker) wait for its result instead of calling the LLM again. Expires if that request dies.
     summary_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Identifies the lease holder, so that only it can store its result and release the lease.
+    summary_lease_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
 
     search_tsv: Mapped[str] = mapped_column(
         TSVECTOR,

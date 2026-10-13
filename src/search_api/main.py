@@ -1,17 +1,13 @@
-import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from search_api.api import health_router, router
+from search_api.api import include_api
 from search_api.config import Settings, get_settings
-from search_api.db import create_engine, create_sessionmaker
-from search_api.embeddings import Embedder, FastEmbedEmbedder
-from search_api.llm import LLMClient
-from search_api.models import EMBEDDING_DIM
-
-logger = logging.getLogger(__name__)
+from search_api.container import Container, create_container
+from search_api.embeddings import Embedder
+from search_api.llm import LanguageModel
 
 DESCRIPTION = """
 Search API across advisor clients and their documents.
@@ -26,43 +22,23 @@ When the server runs with `API_KEY` set, send it in the `X-API-Key` header.
 """
 
 
-def create_app(settings: Settings | None = None, embedder: Embedder | None = None) -> FastAPI:
-    """Build the application. Tests inject settings and a lightweight embedder."""
+def create_app(
+    settings: Settings | None = None,
+    *,
+    embedder: Embedder | None = None,
+    llm: LanguageModel | None = None,
+) -> FastAPI:
+    """Build the application. Tests inject settings, a lightweight embedder and a fake LLM.
+
+    The container (database pool, models, services) lives exactly as long as the lifespan and
+    reaches requests through the lifespan state; nothing is stored on the app object.
+    """
     settings = settings or get_settings()
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        engine = create_engine(settings)
-        app.state.settings = settings
-        app.state.sessionmaker = create_sessionmaker(engine)
-
-        app.state.embedder = embedder or FastEmbedEmbedder(
-            settings.embedding_model, settings.embedding_cache_dir, settings.embedding_threads
-        )
-        if app.state.embedder.dim != EMBEDDING_DIM:
-            raise RuntimeError(
-                f"Embedding model {settings.embedding_model} produces {app.state.embedder.dim}-d "
-                f"vectors but the database stores {EMBEDDING_DIM}-d vectors; add a migration."
-            )
-
-        llm = None
-        if settings.anthropic_api_key is not None:
-            llm = LLMClient(
-                settings.anthropic_api_key.get_secret_value(),
-                settings.llm_model,
-                settings.llm_timeout_seconds,
-            )
-            logger.info("LLM features enabled with model %s", settings.llm_model)
-        else:
-            logger.info("ANTHROPIC_API_KEY not set: extractive summaries, thesaurus-only expansion")
-        app.state.llm = llm
-
-        try:
-            yield
-        finally:
-            if llm is not None:
-                await llm.close()
-            await engine.dispose()
+    async def lifespan(app: FastAPI) -> AsyncIterator[dict[str, Container]]:
+        async with create_container(settings, embedder=embedder, llm=llm) as container:
+            yield {"container": container}
 
     app = FastAPI(
         title="Nevis Search API",
@@ -70,6 +46,5 @@ def create_app(settings: Settings | None = None, embedder: Embedder | None = Non
         description=DESCRIPTION,
         lifespan=lifespan,
     )
-    app.include_router(router)
-    app.include_router(health_router)
+    include_api(app)
     return app

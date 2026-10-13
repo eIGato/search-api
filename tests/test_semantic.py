@@ -88,7 +88,7 @@ def api(database_url: str) -> Iterator[TestClient]:
     )
     embedder = FastEmbedEmbedder(settings.embedding_model, settings.embedding_cache_dir)
     _truncate(database_url)
-    with TestClient(create_app(settings, embedder)) as client:
+    with TestClient(create_app(settings, embedder=embedder)) as client:
         owners = {
             "john": create_client(client),
             "maria": create_client(
